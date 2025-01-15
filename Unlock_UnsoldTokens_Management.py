@@ -128,6 +128,7 @@ reward_allocation_percentage = st.sidebar.slider("Rewards Allocation (% of Total
 logistic_center = st.sidebar.slider("Logistic Center (Months)", 0, 40, 20, 1)
 logistic_steepness = st.sidebar.slider("Logistic Steepness", 0.1, 10.0, 1.0, 0.1)
 
+
 # Tokens Non Vendus Visualization Toggle
 show_unsold_tokens = st.sidebar.checkbox("Show Unsold Tokens", value=False)
 
@@ -151,20 +152,49 @@ if tokens_redistribution_method == "Dépôt Discret":
     deposit_month = st.sidebar.slider("Deposit Month", offset_month, 39, offset_month + 1)
     deposit_spread = st.sidebar.slider("Deposit Spread (Months)", 1, 3, 1)
 
-# Handle Unsold Tokens Redistribution
+# Redistribute Unsold Tokens with Re-Roll Logic
 unsold_tokens_redistributed = np.zeros(40)
-if tokens_redistribution_method == "Lissage (12 mois)":
-    for month in range(offset_month):
-        if unsold_tokens[month] > 0:
-            for future_month in range(offset_month, offset_month + 12):
-                if future_month < 40:
-                    unsold_tokens_redistributed[future_month] += unsold_tokens[month] / 12
-elif tokens_redistribution_method == "Dépôt Discret":
-    total_unsold = np.sum(unsold_tokens[:offset_month])
-    for i in range(deposit_spread):
-        target_month = deposit_month + i
-        if target_month < 40:
-            unsold_tokens_redistributed[target_month] += total_unsold / deposit_spread
+for month in range(offset_month):
+    if unsold_tokens[month] > 0:
+        # Distribute unsold tokens to the following months (Lissage or Dépôt Discret)
+        if tokens_redistribution_method == "Lissage (12 mois)":
+            for future_month in range(offset_month, min(offset_month + 12, 40)):
+                redistributed_tokens = unsold_tokens[month] / 12
+
+                # Apply sale rules to redistributed tokens
+                price_roi = (median_path[future_month - offset_month] / initial_token_price) * 100
+                sell_pressure = 0.5  # Default fallback if no entry
+                for _, entry in vesting_df.iterrows():  # Iterate categories to apply sale rules
+                    sell_pressure = entry["Default SP (%)"] / 100
+                    if price_roi > entry["Trigger ROI (%)"]:
+                        sell_pressure = entry["Triggered SP (%)"] / 100
+
+                # Calculate sold tokens and add them to the schedule
+                sold_tokens = redistributed_tokens * sell_pressure
+                unsold_tokens_redistributed[future_month] += sold_tokens
+
+        elif tokens_redistribution_method == "Dépôt Discret":
+            total_unsold = unsold_tokens[month]
+            for i in range(deposit_spread):
+                target_month = deposit_month + i
+                if target_month < 40:
+                    redistributed_tokens = total_unsold / deposit_spread
+
+                    # Apply sale rules to redistributed tokens
+                    price_roi = (median_path[target_month - offset_month] / initial_token_price) * 100
+                    sell_pressure = 0.5  # Default fallback if no entry
+                    for _, entry in vesting_df.iterrows():  # Iterate categories to apply sale rules
+                        sell_pressure = entry["Default SP (%)"] / 100
+                        if price_roi > entry["Trigger ROI (%)"]:
+                            sell_pressure = entry["Triggered SP (%)"] / 100
+
+                    # Calculate sold tokens and add them to the schedule
+                    sold_tokens = redistributed_tokens * sell_pressure
+                    unsold_tokens_redistributed[target_month] += sold_tokens
+
+
+
+
 
 # Apply Redistribution to Unlocks
 allocations = {}
@@ -181,6 +211,13 @@ for _, entry in vesting_df.iterrows():
             schedule[month] += entry["Unlock (%)"] * sell_pressure
     schedule = [val if idx >= offset_month else 0 for idx, val in enumerate(schedule)]
     allocations[entry["Category"]] = {"color": entry["Color"], "unlock_schedule": schedule}
+
+
+# Add Checkbox to Exclude Unlocks from Month 0
+exclude_month_0 = st.sidebar.checkbox("Exclude Unlocks from Month 0", value=False)
+if exclude_month_0:
+    for name, data in allocations.items():
+        data["unlock_schedule"][0] = 0  # Set month 0 unlocks to 0
 
 # Add Unsold Tokens Redistribution
 allocations["Unsold Tokens"] = {
